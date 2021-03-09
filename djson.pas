@@ -60,13 +60,16 @@ type
       function GetIsNull: boolean;
     protected
       function jsonString(FancyFormat: Boolean; Iteration: Integer; SpaceChar: String): String;
+      function FindField(const AField: String): TdJSON;
     public
       constructor Create(AParent: TdJSON = nil);
       destructor Destroy; override;
       function GetEnumerator: TList<TdJSON>.TEnumerator;
       class function Parse(const AJSON: string): TdJSON;
+      class function ParseFile(const AFile: String): TdJSON;
 
       function AsJSONString(FancyFormat: Boolean = true; SpaceChar: String = #09): String;
+      function GetField(const AField: String): TdJSON;
 
       property Parent: TdJSON read FParent;
       property IsList: boolean read FIsList;
@@ -97,7 +100,7 @@ var
 implementation
 
 uses
-  XSBuiltIns
+  XSBuiltIns, System.Character
   {$IFDEF MSWINDOWS}, Windows{$ENDIF}, DateUtils, WideStrUtils
   ;
 
@@ -133,6 +136,39 @@ begin
   inherited;
 end;
 
+function TdJSON.FindField(const AField: String): TdJSON;
+var
+  e: TdJSON;
+begin
+  if FIsList then
+  begin
+    for e in FListItems do
+    begin
+      Result := e.FindField(AField);
+      if Result <> nil then
+        exit;
+    end;
+    exit(nil);
+  end
+  else if FIsDict then
+  begin
+    if FItems.TryGetValue(AField, Result) then
+      exit;
+
+    for e in FItems.Values do
+    begin
+      Result := e.FindField(AField);
+      if Result <> nil then
+        exit;
+    end;
+    exit(nil);
+  end
+  else
+  begin
+    exit(nil);
+  end;
+end;
+
 function TdJSON.GetBoolean: boolean;
 begin
   result := VarAsType(FValue, varBoolean);
@@ -143,6 +179,11 @@ function TdJSON.GetDateTime: TDateTime;
 var
   d: string;
 begin
+  if TryISO8601ToDate(VarToStr(FValue), Result) then
+    exit
+  else
+    exit(0);
+
   d := VarToStr(FValue);
   if length(d) = 10 then // date
     result := StrToDate(d, DJSONFormatSettings)
@@ -168,6 +209,13 @@ begin
   result := FListItems.GetEnumerator;
 end;
 
+function TdJSON.GetField(const AField: String): TdJSON;
+begin
+  Result := FindField(AField);
+  if Result = nil then
+    raise EJSONUnknownFieldOrIndex.Create(Format('Unknown Field: %s', [AField]));
+end;
+
 function TdJSON.GetInt64: int64;
 begin
   result := VarAsType(FValue, varInt64);
@@ -190,6 +238,9 @@ begin
   case VarType(AData) and VarTypeMask of
     varString, varUString, varWord, varLongWord:
       begin
+        if not Assigned(FItems) then
+          raise EJSONUnknownFieldOrIndex.Create('Wrong access type, expecting Index but got Field');
+
         i := Pos('|', AData);
         if i = 0 then
           if not FItems.TryGetValue(AData, result) then
@@ -198,15 +249,18 @@ begin
             exit;
 
         if not FItems.TryGetValue(Copy(AData, 1, i - 1), result) then
-            raise EJSONUnknownFieldOrIndex.Create(format('Unknown field: %s', [AData]))
-          else
-          begin
-            Result := result.GetJSONByNameOrIndex(Copy(AData, i + 1, Length(aData) - i));
-            exit;
-          end;
+          raise EJSONUnknownFieldOrIndex.Create(format('Unknown field: %s', [AData]))
+        else
+        begin
+          Result := result.GetJSONByNameOrIndex(Copy(AData, i + 1, Length(aData) - i));
+          exit;
+        end;
       end;
     varInteger, varInt64, varSmallint, varShortInt, varByte:
     begin
+      if not Assigned(FListItems) then
+        raise EJSONUnknownFieldOrIndex.Create('Wrong access type, expecting Field but got Index');
+
       if (FListItems.Count - 1) >= AData then
       begin
         result := FListItems.items[AData];
@@ -233,17 +287,22 @@ function TdJSON.jsonString(FancyFormat: Boolean; Iteration: Integer; SpaceChar: 
   var
     i: Integer;
   begin
-    Result := AString;
-    for i := Length(AString) downto 1 do
+    Result := '';
+    for i := 1 to AString.Length do
     begin
       case AString[i] of
-      '"', '\', '/', #08, #12, #10, #13, #09:
-        begin
-          Insert('\', Result, i);
-        end;
+      '"', '\', '/': Result := Result + '\' + AString[i];
+      #08: Result := Result + '\b';
+      #09: Result := Result + '\t';
+      #10: Result := Result + '\n';
+      #12: Result := Result + '\f';
+      #13: Result := Result + '\r';
+      else
+        Result := Result + AString[i];
       end;
     end;
   end;
+
 var
   sub: TPair<string, TdJSON>;
   entry: TdJSON;
@@ -315,7 +374,8 @@ var
   function getValue: variant;
   var
     prev, prevPrev: char;
-    ubuf, i, skip: integer;
+    ubuf, i, skip, itmp32: integer;
+    itmp64: Int64;
     s: string;
     resultS: string;
     FS: TFormatSettings;
@@ -335,6 +395,10 @@ var
         exit(false)
       else if s = 'true' then
         exit(true);
+      if TryStrToInt(s, itmp32) then
+        exit(itmp32);
+      if TryStrToInt64(s, itmp64) then
+        exit(itmp64);
       exit(StrToFloat(s, FS));
     end;
 
@@ -508,6 +572,21 @@ begin
   end;
 end;
 
+class function TdJSON.ParseFile(const AFile: String): TdJSON;
+var
+  sl: TStringList;
+begin
+  if not FileExists(AFile) then
+    raise EJSONParseError.Create('File does not exist');
+  sl := TStringList.Create;
+  try
+    sl.LoadFromFile(AFile);
+    Result := Parse(sl.Text);
+  finally
+    sl.Free;
+  end;
+end;
+
 { TJSONItems }
 
 destructor TdJSONItems.Destroy;
@@ -544,4 +623,3 @@ initialization
   end;
 
 end.
-
